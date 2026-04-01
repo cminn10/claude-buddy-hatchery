@@ -104,7 +104,9 @@ The `--crack` mode generates a Bun script that runs the full pipeline at native 
 
 ### Applying a cracked userID
 
-1. Edit `~/.claude/.claude.json`
+1. Find your config file — it's `.claude.json` in your Claude config directory:
+   - `~/.claude/.claude.json` (default, `CLAUDE_CONFIG_DIR=~/.claude`)
+   - `~/.claude.json` (if your config dir is `~`)
 2. Set `"userID"` to the cracked value
 3. Delete the `"companion"` key
 4. Run `/buddy` to re-hatch

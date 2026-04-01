@@ -853,7 +853,7 @@ def crack(target: str | None = None) -> None:
     print(f"  {BOLD}Your cracked userID:{RESET}")
     print(f"  {RARITY_COLORS[comp.rarity]}{userid}{RESET}")
     print()
-    print(f"  {DIM}To apply: edit ~/.claude/.claude.json{RESET}")
+    print(f"  {DIM}To apply: edit .claude.json (usually ~/.claude/.claude.json or ~/.claude.json){RESET}")
     print(f"  {DIM}  1. Set \"userID\" to the value above{RESET}")
     print(f"  {DIM}  2. Delete the \"companion\" key{RESET}")
     print(f"  {DIM}  3. Run /buddy to re-hatch{RESET}")
