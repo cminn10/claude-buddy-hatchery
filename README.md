@@ -1,6 +1,6 @@
 # Claude Buddy Hatchery
 
-A reverse-engineered reimplementation of the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) companion hatching algorithm. Explore the buddy system, hunt for rare companions, or crack a userID that gives you the exact buddy you want.
+A reverse-engineered reimplementation of the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) companion hatching algorithm. Explore the buddy system, hunt for rare companions, or crack an ID that gives you the exact buddy you want.
 
 ## Quick Start
 
@@ -40,15 +40,30 @@ Claude Code 2.1.89 introduced `/buddy` — a virtual companion that lives in you
 The algorithm chain:
 
 ```
-userID + "friend-2026-401"  →  Bun.hash (wyhash)  →  32-bit seed
-                                                          ↓
-                                                    SplitMix32 PRNG
-                                                          ↓
-                                              rarity, species, eye, hat,
-                                              shiny, stats, name hint
+account ID + "friend-2026-401"  →  Bun.hash (wyhash)  →  32-bit seed
+                                                              ↓
+                                                        SplitMix32 PRNG
+                                                              ↓
+                                                  rarity, species, eye, hat,
+                                                  shiny, stats, name hint
 ```
 
 Only `name` and `personality` come from an LLM call during hatching. Everything else is a pure function of the hash seed.
+
+### Account types and seed source
+
+The binary determines which ID to use as the seed with this priority chain:
+
+```javascript
+oauthAccount?.accountUuid ?? userID ?? "anon"
+```
+
+| Account type | Seed field | ID format | Persists across sessions? |
+|---|---|---|---|
+| **Subscription** (Pro/Team) | `oauthAccount.accountUuid` | UUID (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) | Yes, until next OAuth login |
+| **API key** (custom routing) | `userID` | hex64 (64 hex chars) | Yes |
+
+Both fields live in `.claude.json`. The `--crack` command generates IDs in both formats.
 
 ### What's in the binary
 
@@ -61,70 +76,99 @@ Only `name` and `personality` come from an LLM call during hatching. Everything 
 | **Hats** | crown, tophat, propeller, halo, wizard, beanie, tinyduck |
 | **Eyes** | `·` `✦` `×` `◉` `@` `°` |
 
-## Usage
+## Commands
 
-### Hatch a buddy
+### `python3 hatch.py [seed]` — hatch a buddy
 
 ```bash
 python3 hatch.py                    # random seed
 python3 hatch.py "any-string"       # deterministic from seed
 ```
 
-### Hunt for specific traits
+### `--hunt [traits]` — search for rare companions
+
+Brute-force random seeds to find companions matching target traits.
 
 ```bash
-python3 hatch.py --hunt legendary
-python3 hatch.py --hunt "shiny capybara"
-python3 hatch.py --hunt "legendary dragon"
+python3 hatch.py --hunt                     # interactive — pick from menus
+python3 hatch.py --hunt legendary           # find any legendary
+python3 hatch.py --hunt "shiny capybara"    # find a shiny capybara
+python3 hatch.py --hunt "legendary dragon"  # find a legendary dragon
 ```
 
-### Crack a userID (requires [Bun](https://bun.sh))
+### `--crack [traits]` — crack an ID (requires [Bun](https://bun.sh))
 
-Find a 64-char hex userID that produces your dream companion:
+Find a cracked ID that produces your dream companion. Outputs both UUID (for subscription accounts) and hex64 (for API key accounts).
 
 ```bash
-python3 hatch.py --crack "legendary shiny dragon"
+python3 hatch.py --crack                            # interactive — pick from menus
+python3 hatch.py --crack "legendary shiny dragon"   # silent mode
 ```
 
+Interactive mode lets you select rarity, species, shiny, hat, and eye from menus. Silent mode parses traits from the string.
+
 ```
-Cracking: legendary shiny dragon
+Cracking UUID (for subscription accounts)...
+Cracking: legendary shiny dragon (format: uuid)
 Odds: ~1/180,000 per attempt — using Bun.hash (native speed)
-Searching up to 5,000,000 candidates...
 
-Cracked in 75,198 attempts (0.1s)
+Cracked in 9,174 attempts (0s)
+
+Cracked accountUuid:
+3148d224-4d36-bc8b-955e-02db9b17d7dd
+
+──────────────────────────────────────────────────
+Cracking hex64 (for API key accounts)...
+
+Cracked userID:
+83d020d639c814a3a2217d69bac9f486e622fd0f16894c193601d65c2f0653b4
 ```
 
-The `--crack` mode generates a Bun script that runs the full pipeline at native speed (millions of hashes/sec), then outputs a userID you can inject into `~/.claude/.claude.json`.
+### `--apply <cracked_id> [config_path]` — patch config
+
+Automatically patches the right field in `.claude.json` based on your account type:
+
+- **If `oauthAccount` exists** in your config → patches `oauthAccount.accountUuid` (expects UUID)
+- **If no `oauthAccount`** → patches `userID` (expects hex64)
+
+Also deletes the `companion` key so `/buddy` will re-hatch.
+
+```bash
+# Auto-detect config location (prompts if multiple found)
+python3 hatch.py --apply "3148d224-4d36-bc8b-955e-02db9b17d7dd"
+
+# Explicit config path
+python3 hatch.py --apply "3148d224-4d36-bc8b-955e-02db9b17d7dd" ~/.claude/.claude.json
+```
+
+Config file is searched in this order:
+1. `$CLAUDE_CONFIG_DIR/.claude.json` (if env var is set)
+2. `~/.claude/.claude.json` (default `CLAUDE_CONFIG_DIR`)
+3. `~/.claude.json`
+
+### Manual apply (without `--apply`)
+
+If you prefer to edit the config manually:
+
+1. Find your `.claude.json` (see locations above)
+2. **Subscription account:** set `oauthAccount.accountUuid` to the cracked UUID
+3. **API key account:** set `userID` to the cracked hex64
+4. Delete the `"companion"` key (so `/buddy` re-hatches with new traits)
+5. Run `/buddy` in Claude Code
+
+> **Note:** The name and personality are generated by an LLM call during hatching, so those will be unique each time. The species, rarity, stats, shiny, hat, and eye are deterministic from the seed.
 
 ## How the crack works
 
 1. **The hash is only 32-bit.** `Bun.hash()` returns a wyhash truncated to uint32 — just ~4.3 billion possible seeds.
 2. **Traits are deterministic from the seed.** Given a seed, the PRNG sequence (and thus all companion traits) are fixed.
-3. **Brute-force is fast.** For legendary+shiny+dragon (~1/180k odds), a native Bun script finds a matching userID in under a second.
-
-### Applying a cracked userID
-
-1. Find your config file — it's `.claude.json` in your Claude config directory:
-   - `~/.claude/.claude.json` (default, `CLAUDE_CONFIG_DIR=~/.claude`)
-   - `~/.claude.json` (if your config dir is `~`)
-2. Set `"userID"` to the cracked value
-3. Delete the `"companion"` key
-4. Run `/buddy` to re-hatch
-
-> **Note:** The name and personality are generated by an LLM call during hatching, so those will be unique each time. The species, rarity, stats, shiny, hat, and eye are deterministic.
+3. **Brute-force is fast.** For legendary+shiny+dragon (~1/180k odds), a native Bun script finds a matching ID in under a second.
 
 ### Known limitation: subscription accounts
 
-The buddy seed is determined by this priority chain in the binary:
+For subscription users, `oauthAccount.accountUuid` is set by the OAuth login flow. Modifying this field works and persists **until the next OAuth login/token refresh**, at which point it gets overwritten with the real account UUID.
 
-```javascript
-oauthAccount?.accountUuid ?? userID ?? "anon"
-```
-
-- **API key users** (e.g. custom API routing): no `oauthAccount` is set, so `userID` is used as the seed. Cracking works — just set `"userID"` in the config and it persists across sessions.
-- **Subscription users**: the auth flow sets `oauthAccount.accountUuid` at runtime, which **takes priority over `userID`**. Even if you inject a cracked `userID`, it's ignored because `oauthAccount.accountUuid` exists. And that field gets overwritten by the login flow each session.
-
-**TL;DR:** `--crack` currently only works reliably for API key / custom routing setups. For subscription accounts, the auth system controls the seed and overwrites any injected value. We're investigating workarounds (see [#2](https://github.com/cminn10/claude-buddy-hatchery/issues/2)).
+**Workaround:** after each OAuth login, re-run `--apply` with your cracked UUID. The buddy bones are cached per session, so once you've applied and run `/buddy`, the companion sticks for that session.
 
 ## The hash red herring
 
@@ -147,7 +191,7 @@ Since Claude Code is compiled with Bun, it always takes the `Bun.hash()` (wyhash
 ## Requirements
 
 - Python 3.10+
-- [Bun](https://bun.sh) (required for `--crack` mode; `--hunt` and basic hatching use it when available, fall back to FNV-1a otherwise)
+- [Bun](https://bun.sh) (required for `--crack` and `--apply` verification; `--hunt` and basic hatching use it when available, fall back to FNV-1a otherwise)
 
 ## Disclaimer
 

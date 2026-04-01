@@ -13,7 +13,9 @@ Usage:
   python hatch.py --hunt legendary        # brute-force search for a target rarity
   python hatch.py --hunt shiny            # find any shiny
   python hatch.py --hunt "legendary shiny"  # the holy grail
-  python hatch.py --crack "legendary shiny dragon"  # find a userID to inject
+  python hatch.py --crack                 # interactive — pick your dream buddy
+  python hatch.py --crack "legendary shiny dragon"  # find a cracked ID to inject
+  python hatch.py --apply <cracked_id>    # patch .claude.json with cracked ID
 """
 
 from __future__ import annotations
@@ -692,6 +694,15 @@ function randomHex64() {
   return s;
 }
 
+function randomUUID() {
+  // xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (36 chars)
+  const seg = (n) => { let s = ""; for (let i = 0; i < n; i++) s += HEX[Math.floor(Math.random() * 16)]; return s; };
+  return `${seg(8)}-${seg(4)}-${seg(4)}-${seg(4)}-${seg(12)}`;
+}
+
+const ID_FORMAT = %%ID_FORMAT%%;  // "uuid" or "hex64"
+function randomID() { return ID_FORMAT === "uuid" ? randomUUID() : randomHex64(); }
+
 // Target criteria
 const WANT_RARITY = %%WANT_RARITY%%;
 const WANT_SPECIES = %%WANT_SPECIES%%;
@@ -705,7 +716,7 @@ const startTime = Date.now();
 
 while (attempts < MAX_ATTEMPTS) {
   attempts++;
-  const uid = randomHex64();
+  const uid = randomID();
   const hash = Number(BigInt(Bun.hash(uid + SALT)) & 0xffffffffn);
   const rng = splitmix32(hash);
 
@@ -743,42 +754,36 @@ process.exit(1);
 """
 
 
-def crack(target: str | None = None) -> None:
-    """Find a 64-char hex userID that produces the desired companion."""
-    if not _has_bun():
-        print("  --crack requires Bun. Install from https://bun.sh")
-        return
-
+def _parse_crack_wants(target: str | None) -> dict | None:
+    """Parse crack target into a want dict, from interactive or string input."""
     if target is None:
         want_dict = _interactive_select(mode="crack")
-        if not want_dict:
-            return
-        want_rarity = want_dict.get("rarity")
-        want_species = want_dict.get("species")
-        want_shiny = bool(want_dict.get("shiny"))
-        # hat and eye from interactive mode (crack-only extras)
-        want_hat = want_dict.get("hat")
-        want_eye = want_dict.get("eye")
-    else:
-        target_lower = target.lower()
-        want_rarity = None
-        want_species = None
-        want_shiny = "shiny" in target_lower
-        want_hat = None
-        want_eye = None
+        return want_dict if want_dict else None
 
-        for r in RARITIES:
-            if r in target_lower:
-                want_rarity = r
-                break
-        for s in SPECIES:
-            if s in target_lower:
-                want_species = s
-                break
+    target_lower = target.lower()
+    want_dict: dict[str, object] = {}
 
-    if not want_rarity and not want_species and not want_shiny:
-        print(f"  Specify at least one trait: {', '.join(RARITIES + SPECIES + ['shiny'])}")
-        return
+    for r in RARITIES:
+        if r in target_lower:
+            want_dict["rarity"] = r
+            break
+    for s in SPECIES:
+        if s in target_lower:
+            want_dict["species"] = s
+            break
+    if "shiny" in target_lower:
+        want_dict["shiny"] = True
+
+    return want_dict if want_dict else None
+
+
+def _run_crack(want_dict: dict, *, id_format: str = "hex64") -> dict | None:
+    """Run the Bun crack script and return the result dict."""
+    want_rarity = want_dict.get("rarity")
+    want_species = want_dict.get("species")
+    want_shiny = bool(want_dict.get("shiny"))
+    want_hat = want_dict.get("hat")
+    want_eye = want_dict.get("eye")
 
     odds = 1.0
     if want_rarity:
@@ -795,13 +800,16 @@ def crack(target: str | None = None) -> None:
     expected = int(1 / odds) if odds > 0 else 999999
     max_attempts = max(expected * 20, 5_000_000)
 
-    label_parts = [p for p in [want_rarity, "shiny" if want_shiny else None, want_species, f"hat:{want_hat}" if want_hat else None, f"eye:{want_eye}" if want_eye else None] if p]
-    print(f"  {DIM}Cracking: {' '.join(label_parts)}{RESET}")
+    label_parts = [p for p in [
+        want_rarity, "shiny" if want_shiny else None, want_species,
+        f"hat:{want_hat}" if want_hat else None,
+        f"eye:{want_eye}" if want_eye else None,
+    ] if p]
+    print(f"  {DIM}Cracking: {' '.join(label_parts)} (format: {id_format}){RESET}")
     print(f"  {DIM}Odds: ~1/{expected:,} per attempt — using Bun.hash (native speed){RESET}")
     print(f"  {DIM}Searching up to {max_attempts:,} candidates...{RESET}")
     print()
 
-    # Generate and run Bun script
     script = _CRACK_SCRIPT_TEMPLATE
     script = script.replace("%%SPECIES%%", json.dumps(SPECIES))
     script = script.replace("%%EYES%%", json.dumps(EYES))
@@ -811,6 +819,7 @@ def crack(target: str | None = None) -> None:
     script = script.replace("%%WANT_SHINY%%", "true" if want_shiny else "false")
     script = script.replace("%%WANT_HAT%%", json.dumps(want_hat) if want_hat else "null")
     script = script.replace("%%WANT_EYE%%", json.dumps(want_eye) if want_eye else "null")
+    script = script.replace("%%ID_FORMAT%%", json.dumps(id_format))
     script = script.replace("%%MAX_ATTEMPTS%%", str(max_attempts))
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".mjs", delete=False) as f:
@@ -822,16 +831,16 @@ def crack(target: str | None = None) -> None:
             ["bun", "run", script_path],
             capture_output=True, text=True, timeout=120,
         )
-
         if result.returncode != 0:
             print(f"  {result.stderr.strip()}")
-            return
-
-        data = json.loads(result.stdout.strip())
+            return None
+        return json.loads(result.stdout.strip())
     finally:
         os.unlink(script_path)
 
-    # Verify and display
+
+def _display_crack_result(data: dict) -> Companion:
+    """Display and verify a crack result. Returns the companion."""
     userid = data["userid"]
     print(f"  {BOLD}Cracked in {data['attempts']:,} attempts ({data['elapsed_sec']}s){RESET}")
 
@@ -842,22 +851,171 @@ def crack(target: str | None = None) -> None:
     )
     print_companion(comp)
 
-    # Verify with our own pipeline
     verified = hatch(userid)
     if verified.rarity != comp.rarity or verified.species != comp.species:
         print(f"  {BOLD}WARNING: verification mismatch — hash inconsistency{RESET}")
     else:
-        print(f"  {DIM}Verified: hatch(userID) matches Bun output{RESET}")
+        print(f"  {DIM}Verified: hatch(cracked_id) matches Bun output{RESET}")
+
+    return comp
+
+
+def crack(target: str | None = None) -> None:
+    """Find a cracked ID that produces the desired companion."""
+    if not _has_bun():
+        print("  --crack requires Bun. Install from https://bun.sh")
+        return
+
+    want_dict = _parse_crack_wants(target)
+    if not want_dict:
+        print(f"  Specify at least one trait: {', '.join(RARITIES + SPECIES + ['shiny'])}")
+        return
+
+    # Crack both formats
+    print(f"\n  {BOLD}Cracking UUID (for subscription accounts)...{RESET}")
+    uuid_data = _run_crack(want_dict, id_format="uuid")
+
+    print(f"\n  {BOLD}Cracking hex64 (for API key accounts)...{RESET}")
+    hex_data = _run_crack(want_dict, id_format="hex64")
+
+    # Display results
+    if uuid_data:
+        print(f"\n  {'─' * 50}")
+        print(f"  {BOLD}Result (subscription account — UUID format):{RESET}")
+        _display_crack_result(uuid_data)
+        print(f"  {BOLD}Cracked accountUuid:{RESET}")
+        print(f"  {RARITY_COLORS[uuid_data['rarity']]}{uuid_data['userid']}{RESET}")
+
+    if hex_data:
+        print(f"\n  {'─' * 50}")
+        print(f"  {BOLD}Result (API key account — hex64 format):{RESET}")
+        _display_crack_result(hex_data)
+        print(f"  {BOLD}Cracked userID:{RESET}")
+        print(f"  {RARITY_COLORS[hex_data['rarity']]}{hex_data['userid']}{RESET}")
 
     print()
-    print(f"  {BOLD}Your cracked userID:{RESET}")
-    print(f"  {RARITY_COLORS[comp.rarity]}{userid}{RESET}")
+    print(f"  {BOLD}To apply:{RESET}")
+    print(f"  {DIM}  Subscription: set oauthAccount.accountUuid to the UUID above{RESET}")
+    print(f"  {DIM}  API key:      set userID to the hex64 above{RESET}")
+    print(f"  {DIM}  Then delete the \"companion\" key and run /buddy{RESET}")
     print()
-    print(f"  {DIM}To apply: edit .claude.json (usually ~/.claude/.claude.json or ~/.claude.json){RESET}")
-    print(f"  {DIM}  1. Set \"userID\" to the value above{RESET}")
-    print(f"  {DIM}  2. Delete the \"companion\" key{RESET}")
-    print(f"  {DIM}  3. Run /buddy to re-hatch{RESET}")
+    print(f"  {DIM}Or run: python3 hatch.py --apply <cracked_id>{RESET}")
     print()
+
+
+# ── Apply mode ─────────────────────────────────────────────────────────────
+
+def _find_all_config_paths() -> list[str]:
+    """Find all .claude.json config files on the system."""
+    seen: set[str] = set()
+    found: list[str] = []
+
+    candidates = [
+        os.path.expanduser("~/.claude/.claude.json"),
+        os.path.expanduser("~/.claude.json"),
+    ]
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        candidates.insert(0, os.path.join(os.path.expanduser(config_dir), ".claude.json"))
+
+    for path in candidates:
+        real = os.path.realpath(path)
+        if real not in seen and os.path.isfile(path):
+            seen.add(real)
+            found.append(path)
+
+    return found
+
+
+def _detect_id_field(config: dict) -> str:
+    """Detect which field to patch based on config content.
+
+    If oauthAccount exists → subscription account → patch accountUuid.
+    Otherwise → API key account → patch userID.
+    """
+    if "oauthAccount" in config:
+        return "oauth"
+    return "userid"
+
+
+def apply_id(cracked_id: str, config_path: str | None = None) -> None:
+    """Apply a cracked ID to .claude.json.
+
+    Auto-detects which field to patch:
+      - oauthAccount exists → set oauthAccount.accountUuid (needs UUID format)
+      - no oauthAccount    → set userID (needs hex64 format)
+    """
+    # Resolve config path
+    if config_path and not os.path.isfile(config_path):
+        print(f"  File not found: {config_path}")
+        return
+
+    if not config_path:
+        configs = _find_all_config_paths()
+        if not configs:
+            print(f"  Could not find .claude.json. Checked:")
+            print(f"    ~/.claude/.claude.json")
+            print(f"    ~/.claude.json")
+            print(f"  Tip: pass the path explicitly: --apply <id> <path>")
+            return
+        if len(configs) == 1:
+            config_path = configs[0]
+        else:
+            config_path = _select_one(
+                "Multiple config files found. Which one?",
+                configs, allow_any=False,
+            )
+            if not config_path:
+                return
+
+    with open(config_path) as f:
+        config = json.load(f)
+
+    # Auto-detect which field to patch
+    id_field = _detect_id_field(config)
+
+    is_uuid = len(cracked_id) == 36 and cracked_id.count("-") == 4
+    is_hex64 = len(cracked_id) == 64 and all(c in "0123456789abcdef" for c in cracked_id)
+
+    if id_field == "oauth":
+        if is_hex64:
+            print(f"  {BOLD}Warning:{RESET} this config has oauthAccount (subscription account),")
+            print(f"  which uses UUID format (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).")
+            print(f"  You provided a hex64 ID. Re-run --crack to get a UUID, or use")
+            print(f"  --apply <uuid_id> to apply a UUID.")
+            return
+        if not is_uuid:
+            print(f"  Unrecognized format. Expected UUID (36 chars) for subscription account.")
+            return
+        old_val = config.get("oauthAccount", {}).get("accountUuid", "(none)")
+        config["oauthAccount"]["accountUuid"] = cracked_id
+        field_name = "oauthAccount.accountUuid"
+    else:
+        if is_uuid:
+            print(f"  {BOLD}Warning:{RESET} this config has no oauthAccount (API key account),")
+            print(f"  which uses hex64 format (64 hex chars).")
+            print(f"  You provided a UUID. Re-run --crack to get a hex64, or use")
+            print(f"  --apply <hex64_id> to apply a hex64.")
+            return
+        if not is_hex64:
+            print(f"  Unrecognized format. Expected hex64 (64 chars) for API key account.")
+            return
+        old_val = config.get("userID", "(none)")
+        config["userID"] = cracked_id
+        field_name = "userID"
+
+    # Remove companion so /buddy re-hatches
+    old_companion = config.pop("companion", None)
+
+    with open(config_path, "w") as f:
+        json.dump(config, f)
+
+    print()
+    print(f"  {BOLD}Applied to {config_path}{RESET}")
+    print(f"  {DIM}{field_name}: {old_val} → {cracked_id}{RESET}")
+    if old_companion:
+        print(f"  {DIM}companion: deleted (was {old_companion.get('name', '?')}){RESET}")
+    print(f"  {DIM}Run /buddy in Claude Code to hatch your new companion!{RESET}")
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
@@ -871,6 +1029,9 @@ def main() -> None:
     elif len(args) >= 1 and args[0] == "--crack":
         rest = " ".join(args[1:]).strip()
         crack(rest if rest else None)
+    elif len(args) >= 2 and args[0] == "--apply":
+        config_path = args[2] if len(args) >= 3 else None
+        apply_id(args[1], config_path)
     elif len(args) == 1 and not args[0].startswith("--"):
         print_companion(hatch(args[0]))
     elif len(args) == 0:
