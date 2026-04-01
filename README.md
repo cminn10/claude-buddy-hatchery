@@ -2,6 +2,8 @@
 
 A reverse-engineered reimplementation of the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) companion hatching algorithm. Explore the buddy system, hunt for rare companions, or crack an ID that gives you the exact buddy you want.
 
+English | [中文](./README.zh-CN.md)
+
 ## Quick Start
 
 ```bash
